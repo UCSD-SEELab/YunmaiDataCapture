@@ -8,8 +8,12 @@ console. This script is for debug purposes and for initial data gathering for
 the IBM for Healthy Aging project.
 
 """
+MQTT_EN = False
 
 from bluepy import btle
+if (MQTT_EN):
+    import paho.mqtt.client as mqtt #import first client
+
 
 class YunmaiDelegate(btle.DefaultDelegate):
     """
@@ -111,12 +115,13 @@ class YunmaiDelegate(btle.DefaultDelegate):
         16: body type - always 3
         17: CHK
     """
-    def __init__(self, params=None):
+    def __init__(self, params=None, mqttclient=None):
         btle.DefaultDelegate.__init__(self)
         
         self.message_prev = []
         self.message_now= []
         self.list_parsed_msg = []
+        self.client = mqttclient
 
     def handleNotification(self, cHandle, data):
         # Check that cHandle is from the correct characteristic (0xffe4) and 
@@ -131,11 +136,9 @@ class YunmaiDelegate(btle.DefaultDelegate):
         03: response type
         """
         
-	data = [ord(element) for element in data]
-        print([hex(element) for element in data])
+        print(data)
         
         # Check packet start (bit: 0x00, value: 0x0d)
-            #how to print off hexadecimal as string (ERROR here)
         if (data[0] != 0x0d):
             print('ERROR. Packet start is incorrect')
             return
@@ -201,6 +204,8 @@ class YunmaiDelegate(btle.DefaultDelegate):
                     }
             print(dict_parsed_msg)
             self.list_parsed_msg.append(dict_parsed_msg)
+            if (self.client):
+                self.client.publish("YunmaiScaleE35F/raw", dict_parsed_msg)
             
         elif (message_type == 0x17):
             # data packet from time check
@@ -208,12 +213,34 @@ class YunmaiDelegate(btle.DefaultDelegate):
         else:
             print('message type: {0} was unprocessed'.format(message_type))
         
-        return
-
-
-
+        return         
+         
+def process_message(client, userdata, message): #add callback function
+    data = message.payload
+    print('data')
+    print('message datetime = %d'.format(data['datetime']))
+         
+          
 if __name__ == '__main__':
     # Initialization
+    if (MQTT_EN):
+        broker_address = "m12.cloudmqtt.com" #should this be IP address?
+        #broker_address = "https://api.cloudmqtt.com/console/9773410/details"
+        data = {'datetime' : datetime, 'userid' : userid, 'weight' : weight,
+                'resistance' : resistance, 'fat' : fat}
+        
+        # Setup MQTT connection
+        print("creating new instance")
+        client = mqtt.Client("Server1") #additional parameters for clean_session, userdata, protection,
+        client.on_message = process_message
+        print("connecting to broker")
+        client.connect(broker_address)
+        client.loop_start() #start the loop
+        print("subscribing to topic", "YunmaiScaleE35F/raw")
+        client.subscribe("YunmaiScaleE35F/raw")
+    else:
+        client = None
+    
     scale_address = '50:33:8B:17:E3:5F'
     dev_scale = btle.Peripheral( scale_address )
     dev_scale.setDelegate( YunmaiDelegate() )
@@ -222,6 +249,9 @@ if __name__ == '__main__':
     #   svc = p.getServiceByUUID( service_uuid )
     #   ch = svc.getCharacteristics( char_uuid )[0]
     #   ch.write( setup_data )
+    
+
+        
     
     # Main loop
     
@@ -232,3 +262,5 @@ if __name__ == '__main__':
     
         print('Waiting...')
         # Perhaps do something else here
+
+    client.loop_stop()
