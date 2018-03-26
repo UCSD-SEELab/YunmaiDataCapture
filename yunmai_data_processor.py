@@ -8,8 +8,9 @@ console. This script is for debug purposes and for initial data gathering for
 the IBM for Healthy Aging project.
 
 """
-MQTT_EN = False
+MQTT_EN = True
 
+import time
 from bluepy import btle
 if (MQTT_EN):
     import paho.mqtt.client as mqtt #import first client
@@ -115,18 +116,19 @@ class YunmaiDelegate(btle.DefaultDelegate):
         16: body type - always 3
         17: CHK
     """
-    def __init__(self, params=None, mqttclient=None):
+    def __init__(self, scale_name='YunmaiScale', params=None, mqttclient=None):
         btle.DefaultDelegate.__init__(self)
         
         self.message_prev = []
         self.message_now= []
         self.list_parsed_msg = []
         self.client = mqttclient
+        self.scale_name = scale_name
 
     def handleNotification(self, cHandle, data):
         # Check that cHandle is from the correct characteristic (0xffe4) and 
         # service (0xffe0)
-        print('Packet Received')
+        print('{0}: Packet Received'.format(self.scale_name))
         
         # Process incoming message
         """
@@ -136,15 +138,16 @@ class YunmaiDelegate(btle.DefaultDelegate):
         03: response type
         """
         
-        print(data)
+        data = [ord(element) for element in data]
+        print([hex(element) for element in data])
         
         # Check packet start (bit: 0x00, value: 0x0d)
         if (data[0] != 0x0d):
-            print('ERROR. Packet start is incorrect')
+            print('{0}: ERROR. Packet start is incorrect'.format(self.scale_name))
             return
         
         if (len(data) < 4):
-            print('ERROR. Packet incomplete')
+            print('{0}: ERROR. Packet incomplete'.format(self.scale_name))
             return
         
         self.message_prev = self.message_now[:]
@@ -160,6 +163,17 @@ class YunmaiDelegate(btle.DefaultDelegate):
             08-09: weight - BE uint16 times 0.01
             10: CHK
             """
+            datetime = data[4] << (8*3)
+            datetime += data[5] << (8*2)
+            datetime += data[6] << (8*1)
+            datetime += data[7]
+
+            weight = data[8] << (8*1)
+            weight += data[9]
+            weight *= 0.01
+            
+            print('{0}: {1:d}  {2:3.2f} kg...'.format(self.scale_name, datetime, weight))            
+            
             return
         
         elif (message_type == 0x02):
@@ -202,65 +216,109 @@ class YunmaiDelegate(btle.DefaultDelegate):
                     'resistance' : resistance,
                     'fat' : fat
                     }
-            print(dict_parsed_msg)
+            # print(dict_parsed_msg)
+            
+            print('{0}: {1}  {2:3.2f} kg, {3:3.1f} % fat, {4:3.0f} ohm'.format(self.scale_name, datetime, weight, fat, resistance)) 
             self.list_parsed_msg.append(dict_parsed_msg)
             if (self.client):
-                self.client.publish("YunmaiScaleE35F/raw", dict_parsed_msg)
+                self.client.publish('YunmaiScaleE35F.raw', dict_parsed_msg)
             
         elif (message_type == 0x17):
             # data packet from time check
             return
         else:
-            print('message type: {0} was unprocessed'.format(message_type))
+            print('{0}: message type {1} was unprocessed'.format(self.scale_name ,message_type))
         
         return         
          
 def process_message(client, userdata, message): #add callback function
     data = message.payload
-    print('data')
-    print('message datetime = %d'.format(data['datetime']))
+    print('MQTT: message received')
+    print('MQTT: {0} {1}'.format(message.topic, str(message.payload)))
          
           
 if __name__ == '__main__':
     # Initialization
     if (MQTT_EN):
-        broker_address = "m12.cloudmqtt.com" #should this be IP address?
-        #broker_address = "https://api.cloudmqtt.com/console/9773410/details"
-        data = {'datetime' : datetime, 'userid' : userid, 'weight' : weight,
-                'resistance' : resistance, 'fat' : fat}
-        
+        broker_address = 'server.healthyaging'
+        broker_port = 61613
+
         # Setup MQTT connection
-        print("creating new instance")
-        client = mqtt.Client("Server1") #additional parameters for clean_session, userdata, protection,
+        client = mqtt.Client(client_id='YunmaiScaleE35F', clean_session=False) #additional parameters for clean_session, userdata, protection,
         client.on_message = process_message
-        print("connecting to broker")
-        client.connect(broker_address)
+        print('MQTT: Connecting to broker {0}'.format(broker_address))
+        client.connect(host=broker_address, port=broker_port)
         client.loop_start() #start the loop
-        print("subscribing to topic", "YunmaiScaleE35F/raw")
-        client.subscribe("YunmaiScaleE35F/raw")
+        topic = 'YunmaiScaleE35F.control'
+        print('MQTT: Subscribing to topic {0}'.format(topic))
+        client.subscribe(topic)
+        
+        client.publish('YunmaiScaleE35F.raw', 'test')
     else:
         client = None
     
     scale_address = '50:33:8B:17:E3:5F'
-    dev_scale = btle.Peripheral( scale_address )
-    dev_scale.setDelegate( YunmaiDelegate() )
-    
-    # Setup to turn notifications on
-    #   svc = p.getServiceByUUID( service_uuid )
-    #   ch = svc.getCharacteristics( char_uuid )[0]
-    #   ch.write( setup_data )
+    dev_scale = btle.Peripheral() # Initializes
+    dev_scale.setDelegate( YunmaiDelegate(scale_name=scale_address) )
+    scale_connected = False
+    scale_chr_name_h = 0x2a00
+    scale_chr_name = None
     
 
-        
+    time_run = 120 # seconds    
+    time_start = time.time()
     
     # Main loop
     
-    while True:
-        if dev_scale.waitForNotifications(1.0):
-            # handleNotification() was called
-            continue
-    
-        print('Waiting...')
-        # Perhaps do something else here
+    while (abs(time.time() - time_start) < time_run):
+        if (scale_connected):
+            try:
+                if dev_scale.waitForNotifications(2.0):
+                    # handleNotification() was called
+                    continue
+                else:
+                    """
+                    # Test for checking services and characteristics
+                    list_services = dev_scale.getServices()
+                    print('List of services:')
+                    for ind, service in enumerate(list_services):
+                        print('  {0}: {1}'.format(ind, service.uuid))
+                        
+                    
+                    list_characteristics = dev_scale.getCharacteristics()
+                    print('List of characteristics:')
+                    for ind, characteristic in enumerate(list_characteristics):
+                        print('  {0}: {1} {2}'.format(ind, characteristic.uuid,
+                              characteristic.supportsRead()))
 
-    client.loop_stop()
+                    print('Test characteristic access:')
+                    scale_chr_name = dev_scale.getCharacteristics(uuid=scale_chr_name_h)
+                    for ind, characteristic in enumerate(scale_chr_name):
+                        print('  {0}: {1} {2}'.format(ind, characteristic.uuid,
+                              characteristic.supportsRead()))
+                        if (characteristic.supportsRead()):
+                            temp = characteristic.read()
+                            print(temp)
+                        else:
+                            print('  Cannot read')
+                    """
+                    
+                    print('{0}: Waiting for packet...'.format(scale_address))
+                    
+            except btle.BTLEException as ex:
+                if (ex.code == btle.BTLEException.DISCONNECTED):
+                    scale_connected = False
+                    print('{0}: Device disconnected.'.format(scale_address))
+        else:
+            try:
+                print('{0}: Establishing connection.'.format(scale_address))
+                dev_scale.connect(scale_address)
+                # scale_chr_name_h = getCharacteristics
+                print('{0}: Connected.'.format(scale_address))
+                scale_connected = True
+                
+            except btle.BTLEException as ex:
+                print('{0}: Connection failed ({1}).'.format(scale_address, ex))
+
+    if (MQTT_EN):
+        client.loop_stop()
