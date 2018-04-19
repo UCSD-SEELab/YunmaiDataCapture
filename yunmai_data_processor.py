@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
 """
 yunmai_data_processor.py
 Michael Ostertag
@@ -11,9 +11,11 @@ the IBM for Healthy Aging project.
 MQTT_EN = True
 
 import time
+import json
+import configparser
 from bluepy import btle
 if (MQTT_EN):
-    import paho.mqtt.client as mqtt #import first client
+    import paho.mqtt.client as mqtt
 
 
 class YunmaiDelegate(btle.DefaultDelegate):
@@ -216,12 +218,10 @@ class YunmaiDelegate(btle.DefaultDelegate):
                     'resistance' : resistance,
                     'fat' : fat
                     }
-            # print(dict_parsed_msg)
-            
             print('{0}: {1}  {2:3.2f} kg, {3:3.1f} % fat, {4:3.0f} ohm'.format(self.scale_name, datetime, weight, fat, resistance)) 
             self.list_parsed_msg.append(dict_parsed_msg)
             if (self.client):
-                self.client.publish('YunmaiScaleE35F.raw', dict_parsed_msg)
+                self.client.publish('YunmaiScaleE35F/raw', json.dumps(dict_parsed_msg))
             
         elif (message_type == 0x17):
             # data packet from time check
@@ -238,34 +238,53 @@ def process_message(client, userdata, message): #add callback function
          
           
 if __name__ == '__main__':
-    # Initialization
+    # Load configuration parameters
+    config = configparser.ConfigParser()
+    config.read('config_yunmai.cfg')
+    
+    try:
+        scale_name = config.get('Device', 'name') 
+        scale_address = config.get('Device', 'address')
+    except:
+        print('Failed to parse scale configuration script')
+        return
+    
+    # Initialize MQTT Connection
     if (MQTT_EN):
-        broker_address = 'server.healthyaging'
-        broker_port = 61613
+        config.read('config_mqtt.cfg')
+        try:
+            broker_address = config.get('Broker', 'address')
+            broker_port = config.getint('Broker', 'port')
+            broker_secure = config.getboolean('Broker', 'secure')
+            topic_ctl = config.get('Topics', 'subscribe')
+            topic_data = config.get('Topics', 'publish')
+            
+            client = mqtt.Client(client_id=scale_name, 
+                                 clean_session=True,
+                                 protocol=mqtt.MQTTv31) 
+            
+            if (broker_secure):
+                broker_uid = config.get('Broker', 'username')
+                broker_pw = config.get('Broker', 'password')
+                client.username_pw_set('admin', 'IBMProject$')
+            
+            client.on_message = process_message
+            print('MQTT: Connecting to broker {0}:{1}'.format(broker_address, broker_port))
+            client.connect(host=broker_address, port=broker_port)
+            client.loop_start()
 
-        # Setup MQTT connection
-        client = mqtt.Client(client_id='YunmaiScaleE35F', clean_session=False) #additional parameters for clean_session, userdata, protection,
-        client.on_message = process_message
-        print('MQTT: Connecting to broker {0}'.format(broker_address))
-        client.connect(host=broker_address, port=broker_port)
-        client.loop_start() #start the loop
-        topic = 'YunmaiScaleE35F.control'
-        print('MQTT: Subscribing to topic {0}'.format(topic))
-        client.subscribe(topic)
-        
-        client.publish('YunmaiScaleE35F.raw', 'test')
+            print('MQTT: Subscribing to topic {0}'.format(topic_ctl))
+            client.subscribe(topic_ctl) 
     else:
         client = None
     
-    scale_address = '50:33:8B:17:E3:5F'
     dev_scale = btle.Peripheral() # Initializes
-    dev_scale.setDelegate( YunmaiDelegate(scale_name=scale_address) )
+    dev_scale.setDelegate( YunmaiDelegate(mqttclient=client, scale_name=scale_name) )
     scale_connected = False
     scale_chr_name_h = 0x2a00
     scale_chr_name = None
-    
 
-    time_run = 120 # seconds    
+    time_run = 4*24*3600 # 4 days in seconds    
     time_start = time.time()
     
     # Main loop
@@ -303,7 +322,7 @@ if __name__ == '__main__':
                             print('  Cannot read')
                     """
                     
-                    print('{0}: Waiting for packet...'.format(scale_address))
+                    # print('{0}: Waiting for packet...'.format(scale_address))
                     
             except btle.BTLEException as ex:
                 if (ex.code == btle.BTLEException.DISCONNECTED):
